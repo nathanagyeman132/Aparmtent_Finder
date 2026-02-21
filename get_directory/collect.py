@@ -23,14 +23,15 @@ import urllib.error
 from dotenv import load_dotenv
 
 # Load .env from the same directory as this script
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-GOOGLE_PLACES_URL = "https://maps.googleapis.com/maps/api/place/findplacefromtext/json"
+GOOGLE_TEXT_SEARCH_NEW_URL = "https://places.googleapis.com/v1/places:searchText"
+GOOGLE_PLACE_DETAILS_NEW_URL = "https://places.googleapis.com/v1/places"
 
 OSM_RESULT_LIMIT = 50          # cap how many nodes/ways we keep from OSM
 GOOGLE_ENRICH_LIMIT = 10       # max entries sent to Google Places
@@ -126,65 +127,208 @@ def clean_osm_data(raw: dict) -> list[dict]:
 # Step 3 — Enrich via Google Places API
 # ---------------------------------------------------------------------------
 
-def google_find_website(entry: dict, api_key: str) -> str | None:
-    """
-    Use Google Places 'Find Place' to look up the official website for one entry.
-    Returns the website URL string, or None if not found.
-    """
-    name = entry.get("name") or ""
-    address = entry.get("address") or ""
+def build_google_query(entry: dict) -> str | None:
+    """Build the text query for Google Find Place."""
+    name = (entry.get("name") or "").strip()
+    address = (entry.get("address") or "").strip()
 
+    if name and address:
+        return f"{name} Austin TX {address}"
     if name:
-        query = f"{name} apartments Austin TX"
-    elif address:
-        query = f"apartments {address} Austin TX"
+        return f"{name} Austin TX"
+    if address:
+        return f"{address} Austin TX apartments"
+    return None
+
+
+def build_location_bias(entry: dict) -> dict:
+    """
+    Bias Find Place near the apartment's coordinates when available.
+    Falls back to Austin city center.
+    """
+    lat = entry.get("lat")
+    lon = entry.get("lon")
+    if lat is None or lon is None:
+        lat = 30.2672
+        lon = -97.7431
+        radius = 20000.0
     else:
-        return None
+        radius = 5000.0
+    return {
+        "circle": {
+            "center": {
+                "latitude": lat,
+                "longitude": lon,
+            },
+            "radius": radius,
+        }
+    }
+
+
+def google_find_place_id(entry: dict, api_key: str) -> tuple[str | None, dict]:
+    """
+    Step 1: Resolve place_id via Find Place.
+    Returns: (place_id | None, debug_info)
+    """
+    query = build_google_query(entry)
+    debug = {
+        "google_query": query,
+        "google_query_used": query,
+        "google_candidates_returned": False,
+        "google_candidates_count": 0,
+        "google_place_id": None,
+        "google_find_status": None,
+        "google_find_error_message": None,
+    }
+
+    if not query:
+        return None, debug
 
     params = urllib.parse.urlencode({
-        "input": query,
-        "inputtype": "textquery",
-        "fields": "name,website",
-        "locationbias": "circle:20000@30.2672,-97.7431",  # Austin city center
+        "fields": "places.id",
         "key": api_key,
     })
+    url = f"{GOOGLE_TEXT_SEARCH_NEW_URL}?{params}"
 
-    url = f"{GOOGLE_PLACES_URL}?{params}"
+    # Try with location bias first; if Google rejects payload as INVALID_ARGUMENT,
+    # retry once without bias to isolate malformed-bias failures.
+    payload_candidates = [
+        {"textQuery": query, "locationBias": build_location_bias(entry)},
+        {"textQuery": query},
+    ]
+
+    for payload_obj in payload_candidates:
+        payload = json.dumps(payload_obj).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, method="POST")
+        req.add_header("User-Agent", "ApartmentFinderPrototype/0.1")
+        req.add_header("Content-Type", "application/json")
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode())
+
+            places = result.get("places", [])
+            debug["google_find_status"] = "OK" if places else "ZERO_RESULTS"
+            debug["google_candidates_count"] = len(places)
+            debug["google_candidates_returned"] = bool(places)
+            if places:
+                place_id = places[0].get("id")
+                debug["google_place_id"] = place_id
+                return place_id, debug
+            return None, debug
+        except urllib.error.HTTPError as exc:
+            debug["google_find_status"] = "HTTP_ERROR"
+            retryable_invalid_argument = False
+            try:
+                err_body = json.loads(exc.read().decode())
+                error_obj = err_body.get("error", {})
+                err_status = error_obj.get("status")
+                err_message = error_obj.get("message")
+                if err_status:
+                    debug["google_find_status"] = err_status
+                debug["google_find_error_message"] = err_message
+                retryable_invalid_argument = (
+                    err_status == "INVALID_ARGUMENT" and "locationBias" in payload_obj
+                )
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+            print(f"    [Google] HTTP error for '{query}': {exc}")
+            if retryable_invalid_argument:
+                continue
+            return None, debug
+        except urllib.error.URLError as exc:
+            debug["google_find_status"] = "NETWORK_ERROR"
+            debug["google_find_error_message"] = str(exc)
+            print(f"    [Google] Network error for '{query}': {exc}")
+            return None, debug
+
+    return None, debug
+
+
+def google_get_place_website(place_id: str, api_key: str) -> tuple[str | None, str | None]:
+    """
+    Step 2: Fetch website from Place Details (New) using place_id.
+    """
+    place_id_escaped = urllib.parse.quote(place_id, safe="")
+    params = urllib.parse.urlencode({
+        "fields": "websiteUri",
+        "key": api_key,
+    })
+    url = f"{GOOGLE_PLACE_DETAILS_NEW_URL}/{place_id_escaped}?{params}"
     req = urllib.request.Request(url)
     req.add_header("User-Agent", "ApartmentFinderPrototype/0.1")
 
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.loads(resp.read().decode())
-
-        candidates = result.get("candidates", [])
-        if candidates:
-            return candidates[0].get("website") or None
+        website = result.get("websiteUri") or None
+        return website, "OK"
+    except urllib.error.HTTPError as exc:
+        details_status = "HTTP_ERROR"
+        try:
+            err_body = json.loads(exc.read().decode())
+            err_status = err_body.get("error", {}).get("status")
+            if err_status:
+                details_status = err_status
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+        print(f"    [Google] HTTP error for place_id '{place_id}': {exc}")
+        return None, details_status
     except urllib.error.URLError as exc:
-        print(f"    [Google] Network error for '{query}': {exc}")
-
-    return None
+        print(f"    [Google] Network error for place_id '{place_id}': {exc}")
+        return None, "NETWORK_ERROR"
 
 
 def enrich_with_google(cleaned: list[dict]) -> list[dict]:
     api_key = os.environ.get("GOOGLE_PLACES_API_KEY", "")
     if not api_key:
         print("[Google] GOOGLE_PLACES_API_KEY not set — skipping enrichment step.")
-        return [dict(entry, google_website=None, google_attempted=False) for entry in cleaned]
+        return [
+            dict(
+                entry,
+                google_website=None,
+                google_attempted=False,
+                google_query=None,
+                google_query_used=None,
+                google_candidates_returned=False,
+                google_candidates_count=0,
+                google_place_id=None,
+                google_find_status=None,
+                google_find_error_message=None,
+                google_details_status=None,
+                google_details_had_website=False,
+                google_status=None,
+            )
+            for entry in cleaned
+        ]
 
     needs_website = [e for e in cleaned if not e.get("website")]
+    needs_website.sort(key=lambda e: 0 if e.get("address") else 1)
     to_enrich = needs_website[:GOOGLE_ENRICH_LIMIT]
 
     print(f"[Google] Will attempt to resolve {len(to_enrich)} entries (limit: {GOOGLE_ENRICH_LIMIT}).")
 
-    enrichment_map: dict[int, str | None] = {}
+    enrichment_map: dict[int, dict] = {}
     resolved = 0
 
     for i, entry in enumerate(to_enrich, start=1):
         label = entry.get("name") or entry.get("address") or f"osm:{entry['osm_id']}"
         print(f"  [{i}/{len(to_enrich)}] Looking up: {label}")
-        website = google_find_website(entry, api_key)
-        enrichment_map[entry["osm_id"]] = website
+        place_id, debug = google_find_place_id(entry, api_key)
+        if place_id:
+            website, details_status = google_get_place_website(place_id, api_key)
+        else:
+            website, details_status = None, "SKIPPED_NO_PLACE_ID"
+        debug["google_details_status"] = details_status
+        debug["google_details_had_website"] = bool(website)
+        if debug.get("google_find_status") != "OK":
+            debug["google_status"] = debug.get("google_find_status")
+        elif details_status and details_status != "OK":
+            debug["google_status"] = details_status
+        else:
+            debug["google_status"] = "OK"
+        debug["google_website"] = website
+        enrichment_map[entry["osm_id"]] = debug
         if website:
             resolved += 1
             print(f"    -> Found: {website}")
@@ -198,9 +342,25 @@ def enrich_with_google(cleaned: list[dict]) -> list[dict]:
     for entry in cleaned:
         eid = entry["osm_id"]
         if eid in enrichment_map:
-            enriched.append(dict(entry, google_website=enrichment_map[eid], google_attempted=True))
+            enriched.append(dict(entry, google_attempted=True, **enrichment_map[eid]))
         else:
-            enriched.append(dict(entry, google_website=None, google_attempted=False))
+            enriched.append(
+                dict(
+                    entry,
+                    google_website=None,
+                    google_attempted=False,
+                    google_query=None,
+                    google_query_used=None,
+                    google_candidates_returned=False,
+                    google_candidates_count=0,
+                    google_place_id=None,
+                    google_find_status=None,
+                    google_find_error_message=None,
+                    google_details_status=None,
+                    google_details_had_website=False,
+                    google_status=None,
+                )
+            )
 
     return enriched
 

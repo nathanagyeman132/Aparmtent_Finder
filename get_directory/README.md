@@ -9,9 +9,11 @@ OpenStreetMap and enrich a small subset with website data from Google Places?
    as residential apartment buildings inside Austin's bounding box.
 2. Caps results at 50 entries.
 3. Normalises each entry into readable JSON (name, lat/lon, address, website).
-4. For the first 10 entries that have **no website**, it calls the
-   [Google Places Find Place API](https://developers.google.com/maps/documentation/places/web-service/search-find-place)
-   to attempt website resolution.
+4. For the first 10 entries that have **no website**, it performs a two-step
+   Google Places enrichment flow using Places API (New):
+   - Find Place: resolve `place_id` from apartment name + `Austin TX` and/or address
+     (with location bias near the entry lat/lon).
+   - Place Details: fetch only the `website` field for that `place_id`.
 5. Saves three output files in this directory.
 
 ## Output files
@@ -20,7 +22,7 @@ OpenStreetMap and enrich a small subset with website data from Google Places?
 |------|----------|
 | `raw_osm.json` | Raw Overpass API response, truncated to 50 elements |
 | `cleaned.json` | Normalised fields: name, lat, lon, address, website, phone |
-| `enriched.json` | Cleaned data + `google_website` and `google_attempted` flags |
+| `enriched.json` | Cleaned data + enrichment results (`google_website`, `google_attempted`) and debug fields (`google_query`, `google_query_used`, `google_candidates_returned`, `google_candidates_count`, `google_place_id`, `google_find_status`, `google_find_error_message`, `google_details_status`, `google_details_had_website`, `google_status`) |
 
 ## Setup
 
