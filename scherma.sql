@@ -1,4 +1,4 @@
--- db/schema.sql
+-- db/schema.sql for test
 
 CREATE TABLE IF NOT EXISTS listings (
   listing_id TEXT PRIMARY KEY,
