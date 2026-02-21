@@ -54,6 +54,23 @@ The `.env` file is git-ignored. If `GOOGLE_PLACES_API_KEY` is absent (or the
 `.env` file doesn't exist), the script still runs — it fetches and cleans OSM
 data but skips the Google enrichment step.
 
+## Canonicalize Homepages
+
+After `enriched.json` is generated, run:
+
+```bash
+python3 get_directory/canonicalize_homepages.py
+```
+
+This creates:
+
+- `homepages_canonicalized.json`
+
+For each discovered website, it saves:
+
+- `homepage_raw` (original URL from enriched output)
+- `homepage_final` (URL after stripping tracking params and following redirects)
+
 ## Console output
 
 The script logs progress clearly:
