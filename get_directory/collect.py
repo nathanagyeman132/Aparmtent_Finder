@@ -9,7 +9,7 @@ This is a validation experiment — not a production system.
 Usage:
     python collect.py
 
-Environment variables:
+Environment variables (loaded from get_directory/.env if present):
     GOOGLE_PLACES_API_KEY  — required for the Google enrichment step
 """
 
@@ -19,6 +19,11 @@ import time
 import urllib.request
 import urllib.parse
 import urllib.error
+
+from dotenv import load_dotenv
+
+# Load .env from the same directory as this script
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 # ---------------------------------------------------------------------------
 # Config

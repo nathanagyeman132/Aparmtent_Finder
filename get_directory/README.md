@@ -24,18 +24,33 @@ OpenStreetMap and enrich a small subset with website data from Google Places?
 
 ## Setup
 
-Python 3.10+ required. No third-party packages — uses only the standard library.
+Python 3.10+ required. Only one third-party dependency: `python-dotenv`.
 
 ```bash
-# Set your Google Places API key (required for the enrichment step)
-export GOOGLE_PLACES_API_KEY="your_key_here"
+pip install python-dotenv
+```
 
-# Run the script
+Create a `.env` file inside `get_directory/` from the provided example:
+
+```bash
+cp get_directory/.env.example get_directory/.env
+# then edit .env and paste your key
+```
+
+```ini
+# get_directory/.env
+GOOGLE_PLACES_API_KEY=your_google_places_api_key_here
+```
+
+Run the script:
+
+```bash
 python get_directory/collect.py
 ```
 
-If `GOOGLE_PLACES_API_KEY` is not set, the script still runs — it fetches and
-cleans OSM data but skips the Google enrichment step.
+The `.env` file is git-ignored. If `GOOGLE_PLACES_API_KEY` is absent (or the
+`.env` file doesn't exist), the script still runs — it fetches and cleans OSM
+data but skips the Google enrichment step.
 
 ## Console output
 
